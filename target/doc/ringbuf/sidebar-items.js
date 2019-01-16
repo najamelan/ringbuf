@@ -1,1 +1,1 @@
-initSidebarItems({"enum":[["PopAccessError",""],["PopError",""],["PushAccessError",""],["PushError",""]],"struct":[["Consumer",""],["Producer",""],["RingBuffer",""]]});
+initSidebarItems({"enum":[["PopAccessError",""],["PopError",""],["PushAccessError",""],["PushError",""]],"struct":[["Consumer","Consumer part of ring buffer."],["Producer","Producer part of ring buffer."],["RingBuffer","Ring buffer itself."]],"trait":[["ReadFrom","Something that can read from `Read` instance."],["WriteInto","Something that can write into `Write` instance."]]});
