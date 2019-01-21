@@ -1,10 +1,10 @@
 extern crate ringbuf;
 
-use std::io::{self, Read};
+use std::io::{Read};
 use std::thread;
 use std::time::{Duration};
 
-use ringbuf::{RingBuffer, ReadFrom, WriteInto};
+use ringbuf::{RingBuffer};
 
 
 fn main() {
@@ -19,15 +19,14 @@ fn main() {
         let zero = [0 as u8];
         let mut bytes = smsg.as_bytes().chain(&zero[..]);
         loop {
-            match prod.read_from(&mut bytes) {
+            match prod.read_from(&mut bytes, None) {
                 Ok(n) => {
                     if n == 0 {
                         break;
                     }
                     println!("-> {} bytes sent", n);
                 },
-                Err(err) => {
-                    assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+                Err(_) => {
                     println!("-> buffer is full, waiting");
                     thread::sleep(Duration::from_millis(1));
                 },
@@ -42,10 +41,9 @@ fn main() {
 
         let mut bytes = Vec::<u8>::new();
         loop {
-            match cons.write_into(&mut bytes) {
+            match cons.write_into(&mut bytes, None) {
                 Ok(n) => println!("<- {} bytes received", n),
-                Err(err) => {
-                    assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+                Err(_) => {
                     if bytes.ends_with(&[0]) {
                         break;
                     } else {

@@ -58,7 +58,7 @@ fn push() {
     assert_eq!(prod.push(234), Ok(()));
     assert_eq!(head_tail(&prod.rb), (0, 2));
 
-    assert_eq!(prod.push(345), Err((PushError::Full, 345)));
+    assert_eq!(prod.push(345), Err(PushError::Full(345)));
     assert_eq!(head_tail(&prod.rb), (0, 2));
 }
 
@@ -118,7 +118,7 @@ fn push_pop_all() {
         assert_eq!(head_tail(&cons.rb), (cap*i % vcap, (cap*i + 2) % vcap));
 
         match prod.push(v.2) {
-            Err((PushError::Full, w)) => assert_eq!(w, v.2),
+            Err(PushError::Full(w)) => assert_eq!(w, v.2),
             other => panic!(other),
         }
         assert_eq!(head_tail(&cons.rb), (cap*i % vcap, (cap*i + 2) % vcap));
@@ -307,7 +307,7 @@ fn pop_access() {
 
     assert_eq!(prod.push(vs_20.0), Ok(()));
     assert_eq!(prod.push(vs_20.1), Ok(()));
-    assert_eq!(prod.push(0), Err((PushError::Full, 0)));
+    assert_eq!(prod.push(0), Err(PushError::Full(0)));
 
     let pop_fn_20 = |left: &mut [i32], right: &mut [i32]| -> Result<(usize, ()), ()> {
         assert_eq!(left.len(), 2);
@@ -324,7 +324,7 @@ fn pop_access() {
     
     assert_eq!(prod.push(vs_11.0), Ok(()));
     assert_eq!(prod.push(vs_11.1), Ok(()));
-    assert_eq!(prod.push(0), Err((PushError::Full, 0)));
+    assert_eq!(prod.push(0), Err(PushError::Full(0)));
     
     let pop_fn_11 = |left: &mut [i32], right: &mut [i32]| -> Result<(usize, ()), ()> {
         assert_eq!(left.len(), 1);
@@ -404,7 +404,7 @@ fn pop_access_return() {
 
     assert_eq!(prod.push(12), Ok(()));
     assert_eq!(prod.push(34), Ok(()));
-    assert_eq!(prod.push(0), Err((PushError::Full, 0)));
+    assert_eq!(prod.push(0), Err(PushError::Full(0)));
 
     let pop_fn_3 = |left: &mut [i32], right: &mut [i32]| -> Result<(usize, ()), ()> {
         assert_eq!(left.len(), 2);
@@ -530,6 +530,240 @@ fn push_pop_slice() {
 }
 
 #[test]
+fn move_slice() {
+    let buf0 = RingBuffer::<i32>::new(4);
+    let buf1 = RingBuffer::<i32>::new(4);
+    let (mut prod0, mut cons0) = buf0.split();
+    let (mut prod1, mut cons1) = buf1.split();
+
+    let mut tmp = [0; 5];
+
+    assert_eq!(prod0.push_slice(&[0, 1, 2]), Ok(3));
+
+    assert_eq!(prod1.move_slice(&mut cons0, None), Ok(3));
+    assert_eq!(prod1.move_slice(&mut cons0, None), Err(MoveSliceError::Empty));
+
+    assert_eq!(cons1.pop_slice(&mut tmp), Ok(3));
+    assert_eq!(tmp[0..3], [0, 1, 2]);
+
+
+    assert_eq!(prod0.push_slice(&[3, 4, 5]), Ok(3));
+
+    assert_eq!(prod1.move_slice(&mut cons0, None), Ok(3));
+
+    assert_eq!(cons1.pop_slice(&mut tmp), Ok(3));
+    assert_eq!(tmp[0..3], [3, 4, 5]);
+
+
+    assert_eq!(prod1.push_slice(&[6, 7, 8]), Ok(3));
+    assert_eq!(prod0.push_slice(&[9, 10]), Ok(2));
+
+    assert_eq!(prod1.move_slice(&mut cons0, None), Ok(1));
+    assert_eq!(prod1.move_slice(&mut cons0, None), Err(MoveSliceError::Full));
+
+    assert_eq!(cons1.pop_slice(&mut tmp), Ok(4));
+    assert_eq!(tmp[0..4], [6, 7, 8, 9]);
+}
+
+#[test]
+fn move_slice_count() {
+    let buf0 = RingBuffer::<i32>::new(4);
+    let buf1 = RingBuffer::<i32>::new(4);
+    let (mut prod0, mut cons0) = buf0.split();
+    let (mut prod1, mut cons1) = buf1.split();
+
+    let mut tmp = [0; 5];
+
+    assert_eq!(prod0.push_slice(&[0, 1, 2]), Ok(3));
+
+    assert_eq!(prod1.move_slice(&mut cons0, Some(2)), Ok(2));
+
+    assert_eq!(cons1.pop_slice(&mut tmp), Ok(2));
+    assert_eq!(tmp[0..2], [0, 1]);
+
+    assert_eq!(prod1.move_slice(&mut cons0, Some(2)), Ok(1));
+
+    assert_eq!(cons1.pop_slice(&mut tmp), Ok(1));
+    assert_eq!(tmp[0..1], [2]);
+
+
+    assert_eq!(prod0.push_slice(&[3, 4, 5, 6]), Ok(4));
+
+    assert_eq!(prod1.move_slice(&mut cons0, Some(3)), Ok(3));
+
+    assert_eq!(cons1.pop_slice(&mut tmp), Ok(3));
+    assert_eq!(tmp[0..3], [3, 4, 5]);
+
+    assert_eq!(prod0.push_slice(&[7, 8, 9]), Ok(3));
+
+    assert_eq!(prod1.move_slice(&mut cons0, Some(5)), Ok(4));
+
+    assert_eq!(cons1.pop_slice(&mut tmp), Ok(4));
+    assert_eq!(tmp[0..4], [6, 7, 8, 9]);
+}
+
+#[test]
+fn read_from() {
+    let buf0 = RingBuffer::<u8>::new(4);
+    let buf1 = RingBuffer::<u8>::new(4);
+    let (mut prod0, mut cons0) = buf0.split();
+    let (mut prod1, mut cons1) = buf1.split();
+
+    let mut tmp = [0; 5];
+
+    assert_eq!(prod0.push_slice(&[0, 1, 2]), Ok(3));
+
+    match prod1.read_from(&mut cons0, None) {
+        Ok(n) => assert_eq!(n, 3),
+        other => panic!("{:?}", other),
+    }
+    match prod1.read_from(&mut cons0, None) {
+        Err(ReadFromError::Read(e)) => {
+            assert_eq!(e.kind(), io::ErrorKind::WouldBlock);
+        },
+        other => panic!("{:?}", other),
+    }
+
+    assert_eq!(cons1.pop_slice(&mut tmp), Ok(3));
+    assert_eq!(tmp[0..3], [0, 1, 2]);
+
+
+    assert_eq!(prod0.push_slice(&[3, 4, 5]), Ok(3));
+
+    match prod1.read_from(&mut cons0, None) {
+        Ok(n) => assert_eq!(n, 2),
+        other => panic!("{:?}", other),
+    }
+    assert_eq!(cons1.pop_slice(&mut tmp), Ok(2));
+    assert_eq!(tmp[0..2], [3, 4]);
+
+    match prod1.read_from(&mut cons0, None) {
+        Ok(n) => assert_eq!(n, 1),
+        other => panic!("{:?}", other),
+    }
+    assert_eq!(cons1.pop_slice(&mut tmp), Ok(1));
+    assert_eq!(tmp[0..1], [5]);
+
+
+    assert_eq!(prod1.push_slice(&[6, 7, 8]), Ok(3));
+    assert_eq!(prod0.push_slice(&[9, 10]), Ok(2));
+
+    match prod1.read_from(&mut cons0, None) {
+        Ok(n) => assert_eq!(n, 1),
+        other => panic!("{:?}", other),
+    }
+    match prod1.read_from(&mut cons0, None) {
+        Err(ReadFromError::RbFull) => (),
+        other => panic!("{:?}", other),
+    }
+
+    assert_eq!(cons1.pop_slice(&mut tmp), Ok(4));
+    assert_eq!(tmp[0..4], [6, 7, 8, 9]);
+}
+
+#[test]
+fn write_into() {
+    let buf0 = RingBuffer::<u8>::new(4);
+    let buf1 = RingBuffer::<u8>::new(4);
+    let (mut prod0, mut cons0) = buf0.split();
+    let (mut prod1, mut cons1) = buf1.split();
+
+    let mut tmp = [0; 5];
+
+    assert_eq!(prod0.push_slice(&[0, 1, 2]), Ok(3));
+
+    match cons0.write_into(&mut prod1, None) {
+        Ok(n) => assert_eq!(n, 3),
+        other => panic!("{:?}", other),
+    }
+    match cons0.write_into(&mut prod1, None) {
+        Err(WriteIntoError::RbEmpty) => (),
+        other => panic!("{:?}", other),
+    }
+
+    assert_eq!(cons1.pop_slice(&mut tmp), Ok(3));
+    assert_eq!(tmp[0..3], [0, 1, 2]);
+
+
+    assert_eq!(prod0.push_slice(&[3, 4, 5]), Ok(3));
+
+    match cons0.write_into(&mut prod1, None) {
+        Ok(n) => assert_eq!(n, 2),
+        other => panic!("{:?}", other),
+    }
+    assert_eq!(cons1.pop_slice(&mut tmp), Ok(2));
+    assert_eq!(tmp[0..2], [3, 4]);
+
+    match cons0.write_into(&mut prod1, None) {
+        Ok(n) => assert_eq!(n, 1),
+        other => panic!("{:?}", other),
+    }
+    assert_eq!(cons1.pop_slice(&mut tmp), Ok(1));
+    assert_eq!(tmp[0..1], [5]);
+
+
+    assert_eq!(prod1.push_slice(&[6, 7, 8]), Ok(3));
+    assert_eq!(prod0.push_slice(&[9, 10]), Ok(2));
+
+    match cons0.write_into(&mut prod1, None) {
+        Ok(n) => assert_eq!(n, 1),
+        other => panic!("{:?}", other),
+    }
+    match cons0.write_into(&mut prod1, None) {
+        Err(WriteIntoError::Write(e)) => {
+            assert_eq!(e.kind(), io::ErrorKind::WouldBlock);
+        },
+        other => panic!("{:?}", other),
+    }
+
+    assert_eq!(cons1.pop_slice(&mut tmp), Ok(4));
+    assert_eq!(tmp[0..4], [6, 7, 8, 9]);
+}
+
+#[test]
+fn read_from_write_into_count() {
+    let buf0 = RingBuffer::<u8>::new(4);
+    let buf1 = RingBuffer::<u8>::new(4);
+    let (mut prod0, mut cons0) = buf0.split();
+    let (mut prod1, mut cons1) = buf1.split();
+
+    let mut tmp = [0; 5];
+
+    assert_eq!(prod0.push_slice(&[0, 1, 2, 3]), Ok(4));
+
+    match prod1.read_from(&mut cons0, Some(3)) {
+        Ok(n) => assert_eq!(n, 3),
+        other => panic!("{:?}", other),
+    }
+    match prod1.read_from(&mut cons0, Some(2)) {
+        Ok(n) => assert_eq!(n, 1),
+        other => panic!("{:?}", other),
+    }
+
+    assert_eq!(cons1.pop_slice(&mut tmp), Ok(4));
+    assert_eq!(tmp[0..4], [0, 1, 2, 3]);
+
+
+    assert_eq!(prod0.push_slice(&[4, 5, 6, 7]), Ok(4));
+
+    match cons0.write_into(&mut prod1, Some(3)) {
+        Ok(n) => assert_eq!(n, 1),
+        other => panic!("{:?}", other),
+    }
+    match cons0.write_into(&mut prod1, Some(2)) {
+        Ok(n) => assert_eq!(n, 2),
+        other => panic!("{:?}", other),
+    }
+    match cons0.write_into(&mut prod1, Some(2)) {
+        Ok(n) => assert_eq!(n, 1),
+        other => panic!("{:?}", other),
+    }
+
+    assert_eq!(cons1.pop_slice(&mut tmp), Ok(4));
+    assert_eq!(tmp[0..4], [4, 5, 6, 7]);
+}
+
+#[test]
 fn push_pop_access_message() {
     let buf = RingBuffer::<u8>::new(7);
     let (mut prod, mut cons) = buf.split();
@@ -614,13 +848,13 @@ fn push_pop_slice_message() {
         while bytes.len() > 0 {
             match prod.push_slice(bytes) {
                 Ok(n) => bytes = &bytes[n..bytes.len()],
-                Err(PushError::Full) => thread::sleep(Duration::from_millis(1)),
+                Err(PushSliceError::Full) => thread::sleep(Duration::from_millis(1)),
             }
         }
         loop {
             match prod.push(0) {
                 Ok(()) => break,
-                Err((PushError::Full, _)) => thread::sleep(Duration::from_millis(1)),
+                Err(PushError::Full(_)) => thread::sleep(Duration::from_millis(1)),
             }
         }
     });
@@ -631,7 +865,7 @@ fn push_pop_slice_message() {
         loop {
             match cons.pop_slice(&mut buffer) {
                 Ok(n) => bytes.extend_from_slice(&buffer[0..n]),
-                Err(PopError::Empty) => {
+                Err(PopSliceError::Empty) => {
                     if bytes.ends_with(&[0]) {
                         break;
                     } else {
@@ -662,11 +896,14 @@ fn read_from_write_into_message() {
         let zero = [0 as u8];
         let mut bytes = smsg.as_bytes().chain(&zero[..]);
         loop {
-            match prod.read_from(&mut bytes) {
+            match prod.read_from(&mut bytes, None) {
                 Ok(n) => if n == 0 { break; },
                 Err(err) => {
-                    assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
-                    thread::sleep(Duration::from_millis(1));
+                    if let ReadFromError::RbFull = err {
+                        thread::sleep(Duration::from_millis(1));
+                    } else {
+                        unreachable!();
+                    }
                 },
             }
         }
@@ -675,14 +912,17 @@ fn read_from_write_into_message() {
     let cjh = thread::spawn(move || {
         let mut bytes = Vec::<u8>::new();
         loop {
-            match cons.write_into(&mut bytes) {
+            match cons.write_into(&mut bytes, None) {
                 Ok(_n) => (),
                 Err(err) => {
-                    assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
-                    if bytes.ends_with(&[0]) {
-                        break;
+                    if let WriteIntoError::RbEmpty = err {
+                        if bytes.ends_with(&[0]) {
+                            break;
+                        } else {
+                            thread::sleep(Duration::from_millis(1));
+                        }
                     } else {
-                        thread::sleep(Duration::from_millis(1));
+                        unreachable!();
                     }
                 },
             }
@@ -719,7 +959,7 @@ fn read_write_message() {
         loop {
             match prod.push(0) {
                 Ok(()) => break,
-                Err((PushError::Full, _)) => thread::sleep(Duration::from_millis(1)),
+                Err(PushError::Full(_)) => thread::sleep(Duration::from_millis(1)),
             }
         }
     });

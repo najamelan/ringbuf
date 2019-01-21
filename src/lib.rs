@@ -1,4 +1,19 @@
-//! Lock-free single-producer single-consumer ring buffer
+//! Lock-free single-producer single-consumer (SPSC) FIFO ring buffer with direct access to inner data.
+//!
+//! # Overview
+//!
+//! `RingBuffer` is the initial structure representing ring buffer itself.
+//! Ring buffer can be splitted into pair of `Producer` and `Consumer`.
+//! 
+//! `Producer` and `Consumer` are used to append/remove elements to/from the ring buffer accordingly. They can be safely transfered between threads.
+//! Operations with `Producer` and `Consumer` are lock-free - they're succeded or failed immediately without blocking or waiting.
+//! 
+//! Elements can be effectively appended/removed one by one or many at once.
+//! Also data could be loaded/stored directly into/from [`Read`]/[`Write`] instances.
+//! And finally, there are `unsafe` methods allowing thread-safe direct access in place to the inner memory being appended/removed.
+//! 
+//! [`Read`]: https://doc.rust-lang.org/std/io/trait.Read.html
+//! [`Write`]: https://doc.rust-lang.org/std/io/trait.Write.html
 //!
 //! # Examples
 //!
@@ -13,7 +28,7 @@
 //! 
 //! prod.push(0).unwrap();
 //! prod.push(1).unwrap();
-//! assert_eq!(prod.push(2), Err((PushError::Full, 2)));
+//! assert_eq!(prod.push(2), Err(PushError::Full(2)));
 //! 
 //! assert_eq!(cons.pop().unwrap(), 0);
 //! 
@@ -31,12 +46,11 @@
 //!
 //! ```rust
 //! # extern crate ringbuf;
-//! use std::io::{self, Read};
+//! use std::io::{Read};
 //! use std::thread;
 //! use std::time::{Duration};
 //! 
-//! use ringbuf::{RingBuffer, ReadFrom, WriteInto};
-//! 
+//! use ringbuf::{RingBuffer};
 //! # fn main() {
 //! let rb = RingBuffer::<u8>::new(10);
 //! let (mut prod, mut cons) = rb.split();
@@ -49,15 +63,14 @@
 //!     let zero = [0 as u8];
 //!     let mut bytes = smsg.as_bytes().chain(&zero[..]);
 //!     loop {
-//!         match prod.read_from(&mut bytes) {
+//!         match prod.read_from(&mut bytes, None) {
 //!             Ok(n) => {
 //!                 if n == 0 {
 //!                     break;
 //!                 }
 //!                 println!("-> {} bytes sent", n);
 //!             },
-//!             Err(err) => {
-//!                 assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+//!             Err(_) => {
 //!                 println!("-> buffer is full, waiting");
 //!                 thread::sleep(Duration::from_millis(1));
 //!             },
@@ -72,10 +85,9 @@
 //! 
 //!     let mut bytes = Vec::<u8>::new();
 //!     loop {
-//!         match cons.write_into(&mut bytes) {
+//!         match cons.write_into(&mut bytes, None) {
 //!             Ok(n) => println!("<- {} bytes received", n),
-//!             Err(err) => {
-//!                 assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+//!             Err(_) => {
 //!                 if bytes.ends_with(&[0]) {
 //!                     break;
 //!                 } else {
@@ -123,6 +135,44 @@ use std::io::{self, Read, Write};
 
 
 #[derive(Debug, PartialEq, Eq)]
+/// `Producer::push` error.
+pub enum PushError<T: Sized> {
+    /// Cannot push: ring buffer is full.
+    Full(T),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+/// `Consumer::pop` error.
+pub enum PopError {
+    /// Cannot pop: ring buffer is empty.
+    Empty,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+/// `Producer::push_slice` error.
+pub enum PushSliceError {
+    /// Cannot push: ring buffer is full.
+    Full,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+/// `Consumer::pop_slice` error.
+pub enum PopSliceError {
+    /// Cannot pop: ring buffer is empty.
+    Empty,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+/// `{Producer, Consumer}::move_slice` error.
+pub enum MoveSliceError {
+    /// Cannot pop: ring buffer is empty.
+    Empty,
+    /// Cannot push: ring buffer is full.
+    Full,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+/// `Producer::push_access` error.
 pub enum PushAccessError {
     /// Cannot push: ring buffer is full.
     Full,
@@ -131,6 +181,7 @@ pub enum PushAccessError {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+/// `Consumer::pop_access` error.
 pub enum PopAccessError {
     /// Cannot pop: ring buffer is empty.
     Empty,
@@ -138,16 +189,22 @@ pub enum PopAccessError {
     BadLen,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum PushError {
-    /// Cannot push: ring buffer is full.
-    Full,
+#[derive(Debug)]
+/// `Producer::read_from` error.
+pub enum ReadFromError {
+    /// Error returned by [`Read`](https://doc.rust-lang.org/std/io/trait.Read.html).
+    Read(io::Error),
+    /// Ring buffer is full.
+    RbFull,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum PopError {
-    /// Cannot pop: ring buffer is empty.
-    Empty,
+#[derive(Debug)]
+/// `Consumer::write_into` error.
+pub enum WriteIntoError {
+    /// Error returned by [`Write`](https://doc.rust-lang.org/std/io/trait.Write.html).
+    Write(io::Error),
+    /// Ring buffer is empty.
+    RbEmpty,
 }
 
 struct SharedVec<T: Sized> {
@@ -186,7 +243,7 @@ pub struct Consumer<T> {
 }
 
 impl<T: Sized> RingBuffer<T> {
-    /// Creates new instance of a ring buffer.
+    /// Creates a new instance of a ring buffer.
     pub fn new(capacity: usize) -> Self {
         let vec_cap = capacity + 1;
         let mut data = Vec::with_capacity(vec_cap);
@@ -207,7 +264,7 @@ impl<T: Sized> RingBuffer<T> {
         )
     }
 
-    /// Returns capacity of a ring buffer.
+    /// Returns capacity of the ring buffer.
     pub fn capacity(&self) -> usize {
         unsafe { self.data.get_ref() }.len() - 1
     }
@@ -271,10 +328,9 @@ impl<T: Sized> Producer<T> {
         self.rb.is_full()
     }
     
-    /// Pushes element into ring buffer.
-    ///
-    /// On error returns pair of error and element that wasn't pushed.
-    pub fn push(&mut self, elem: T) -> Result<(), (PushError, T)> {
+    /// Appends an element to the ring buffer.
+    /// On failure returns an error containing the element that hasn't beed appended.
+    pub fn push(&mut self, elem: T) -> Result<(), PushError<T>> {
         let mut elem_opt = Some(elem);
         match unsafe { self.push_access(|slice, _| {
             mem::forget(mem::replace(&mut slice[0], elem_opt.take().unwrap()));
@@ -288,7 +344,7 @@ impl<T: Sized> Producer<T> {
                 Err(()) => unreachable!(),
             },
             Err(e) => match e {
-                PushAccessError::Full => Err((PushError::Full, elem_opt.unwrap())),
+                PushAccessError::Full => Err(PushError::Full(elem_opt.unwrap())),
                 PushAccessError::BadLen => unreachable!(),
             }
         }
@@ -296,10 +352,11 @@ impl<T: Sized> Producer<T> {
 }
 
 impl<T: Sized + Copy> Producer<T> {
-    /// Pushes elements from slice into ring buffer. Elements should be be cloneable.
+    /// Appends elements from slice to the ring buffer.
+    /// Elements should be [`Copy`](https://doc.rust-lang.org/std/marker/trait.Copy.html).
     ///
-    /// On success returns count of elements been pushed into ring buffer.
-    pub fn push_slice(&mut self, elems: &[T]) -> Result<usize, PushError> {
+    /// On success returns count of elements been appended to the ring buffer.
+    pub fn push_slice(&mut self, elems: &[T]) -> Result<usize, PushSliceError> {
         let push_fn = |left: &mut [T], right: &mut [T]| {
             Ok((if elems.len() < left.len() {
                 left[0..elems.len()].copy_from_slice(elems);
@@ -324,10 +381,121 @@ impl<T: Sized + Copy> Producer<T> {
                 Err(()) => unreachable!(),
             },
             Err(e) => match e {
-                PushAccessError::Full => Err(PushError::Full),
+                PushAccessError::Full => Err(PushSliceError::Full),
                 PushAccessError::BadLen => unreachable!(),
             }
         }
+    }
+
+    /// Removes at most `count` elements from the `Consumer` of the ring buffer
+    /// and appends them to the `Producer` of the another one.
+    /// If `count` is `None` then as much as possible elements will be moved.
+    ///
+    /// Elements should be [`Copy`](https://doc.rust-lang.org/std/marker/trait.Copy.html).
+    ///
+    /// On success returns count of elements been moved.
+    pub fn move_slice(&mut self, other: &mut Consumer<T>, count: Option<usize>)
+    -> Result<usize, MoveSliceError> {
+        let move_fn = |left: &mut [T], right: &mut [T]|
+        -> Result<(usize, ()), PopSliceError> {
+            let (left, right) = match count {
+                Some(c) => {
+                    if c < left.len() {
+                        (&mut left[0..c], &mut right[0..0])
+                    } else if c < left.len() + right.len() {
+                        let l = c - left.len();
+                        (left, &mut right[0..l])
+                    } else {
+                        (left, right)
+                    }
+                },
+                None => (left, right)
+            };
+            other.pop_slice(left).and_then(|n| {
+                if n == left.len() {
+                    other.pop_slice(right).and_then(|m| {
+                        Ok((n + m, ()))
+                    }).or_else(|e| {
+                        match e {
+                            PopSliceError::Empty => Ok((n, ())),
+                        }
+                    })
+                } else {
+                    debug_assert!(n < left.len());
+                    Ok((n, ()))
+                }
+            })
+        };
+        match unsafe { self.push_access(move_fn) } {
+            Ok(res) => match res {
+                Ok((n, ())) => Ok(n),
+                Err(e) => match e {
+                    PopSliceError::Empty => Err(MoveSliceError::Empty),
+                },
+            },
+            Err(e) => match e {
+                PushAccessError::Full => Err(MoveSliceError::Full),
+                PushAccessError::BadLen => unreachable!(),
+            }
+        }
+    }
+}
+
+impl Producer<u8> {
+    /// Reads at most `count` bytes
+    /// from [`Read`](https://doc.rust-lang.org/std/io/trait.Read.html) instance
+    /// and appends them to the ring buffer.
+    /// If `count` is `None` then as much as possible bytes will be read.
+    pub fn read_from(&mut self, reader: &mut dyn Read, count: Option<usize>)
+    -> Result<usize, ReadFromError> {
+        let push_fn = |left: &mut [u8], _right: &mut [u8]|
+        -> Result<(usize, ()), io::Error> {
+            let left = match count {
+                Some(c) => {
+                    if c < left.len() {
+                        &mut left[0..c]
+                    } else {
+                        left
+                    }
+                },
+                None => left,
+            };
+            reader.read(left).and_then(|n| {
+                if n <= left.len() {
+                    Ok((n, ()))
+                } else {
+                    Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Read operation returned invalid number",
+                    ))
+                }
+            })
+        };
+        match unsafe { self.push_access(push_fn) } {
+            Ok(res) => match res {
+                Ok((n, ())) => Ok(n),
+                Err(e) => Err(ReadFromError::Read(e)),
+            },
+            Err(e) => match e {
+                PushAccessError::Full => Err(ReadFromError::RbFull),
+                PushAccessError::BadLen => unreachable!(),
+            }
+        }
+    }
+}
+
+impl Write for Producer<u8> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.push_slice(buffer).or_else(|e| match e {
+            PushSliceError::Full => Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "Ring buffer is full",
+            ))
+        })
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -335,7 +503,7 @@ impl<T: Sized> Producer<T> {
     /// Allows to write into ring buffer memory directry.
     ///
     /// *This function is unsafe beacuse it gives access to possibly uninitialized memory
-    /// and transfers responsibility of manually calling destructors*
+    /// and transfers to the user the responsibility of manually calling destructors*
     ///
     /// Takes a function `f` as argument.
     /// `f` takes two slices of ring buffer content (the second one may be empty). First slice contains older elements.
@@ -407,9 +575,7 @@ impl<T: Sized> Consumer<T> {
         self.rb.is_full()
     }
 
-    /// Retrieves element from ring buffer.
-    ///
-    /// On success returns element been retrieved.
+    /// Removes first element from the ring buffer and returns it.
     pub fn pop(&mut self) -> Result<T, PopError> {
         match unsafe { self.pop_access(|slice, _| {
             let elem = mem::replace(&mut slice[0], mem::uninitialized());
@@ -431,10 +597,11 @@ impl<T: Sized> Consumer<T> {
 }
 
 impl<T: Sized + Copy> Consumer<T> {
-    /// Retrieves elements from ring buffer into slice. Elements should be cloneable.
+    /// Removes first elements from the ring buffer and writes them into a slice.
+    /// Elements should be [`Copy`](https://doc.rust-lang.org/std/marker/trait.Copy.html).
     ///
-    /// On success returns count of elements been retrieved from ring buffer.
-    pub fn pop_slice(&mut self, elems: &mut [T]) -> Result<usize, PopError> {
+    /// On success returns count of elements been removed from the ring buffer.
+    pub fn pop_slice(&mut self, elems: &mut [T]) -> Result<usize, PopSliceError> {
         let pop_fn = |left: &mut [T], right: &mut [T]| {
             let elems_len = elems.len();
             Ok((if elems_len < left.len() {
@@ -460,10 +627,75 @@ impl<T: Sized + Copy> Consumer<T> {
                 Err(()) => unreachable!(),
             },
             Err(e) => match e {
-                PopAccessError::Empty => Err(PopError::Empty),
+                PopAccessError::Empty => Err(PopSliceError::Empty),
                 PopAccessError::BadLen => unreachable!(),
             }
         }
+    }
+
+    /// Removes at most `count` elements from the `Consumer` of the ring buffer
+    /// and appends them to the `Producer` of the another one.
+    /// If `count` is `None` then as much as possible elements will be moved.
+    ///
+    /// Elements should be [`Copy`](https://doc.rust-lang.org/std/marker/trait.Copy.html).
+    ///
+    /// On success returns count of elements been moved.
+    pub fn move_slice(&mut self, other: &mut Producer<T>, count: Option<usize>)
+    -> Result<usize, MoveSliceError> {
+        other.move_slice(self, count)
+    }
+}
+
+impl Consumer<u8> {
+    /// Removes at most first `count` bytes from the ring buffer and writes them into
+    /// a [`Write`](https://doc.rust-lang.org/std/io/trait.Write.html) instance.
+    /// If `count` is `None` then as much as possible bytes will be written.
+    pub fn write_into(&mut self, writer: &mut dyn Write, count: Option<usize>)
+    -> Result<usize, WriteIntoError> {
+        let pop_fn = |left: &mut [u8], _right: &mut [u8]|
+        -> Result<(usize, ()), io::Error> {
+            let left = match count {
+                Some(c) => {
+                    if c < left.len() {
+                        &mut left[0..c]
+                    } else {
+                        left
+                    }
+                },
+                None => left,
+            };
+            writer.write(left).and_then(|n| {
+                if n <= left.len() {
+                    Ok((n, ()))
+                } else {
+                    Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Write operation returned invalid number",
+                    ))
+                }
+            })
+        };
+        match unsafe { self.pop_access(pop_fn) } {
+            Ok(res) => match res {
+                Ok((n, ())) => Ok(n),
+                Err(e) => Err(WriteIntoError::Write(e)),
+            },
+            Err(e) => match e {
+                PopAccessError::Empty => Err(WriteIntoError::RbEmpty),
+                PopAccessError::BadLen => unreachable!(),
+            }
+        }
+    }
+}
+
+impl Read for Consumer<u8> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.pop_slice(buffer).or_else(|e| match e {
+            PopSliceError::Empty => Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "Ring buffer is empty",
+            ))
+        })
     }
 }
 
@@ -471,7 +703,7 @@ impl<T: Sized> Consumer<T> {
     /// Allows to read from ring buffer memory directry.
     ///
     /// *This function is unsafe beacuse it gives access to possibly uninitialized memory
-    /// and transfers responsibility of manually calling destructors*
+    /// and transfers to the user the responsibility of manually calling destructors*
     ///
     /// Takes a function `f` as argument.
     /// `f` takes two slices of ring buffer content (the second one may be empty). First slice contains older elements.
@@ -516,105 +748,6 @@ impl<T: Sized> Consumer<T> {
         }
     }
 }
-
-/// Something that can read from [`Read`](https://doc.rust-lang.org/std/io/trait.Read.html) instance.
-pub trait ReadFrom {
-    /// Read from [`Read`](https://doc.rust-lang.org/std/io/trait.Read.html) instance.
-    fn read_from(&mut self, reader: &mut dyn Read) -> io::Result<usize>;
-}
-
-/// Something that can write into [`Write`](https://doc.rust-lang.org/std/io/trait.Write.html) instance.
-pub trait WriteInto {
-    /// Write into [`Write`](https://doc.rust-lang.org/std/io/trait.Write.html) instance.
-    fn write_into(&mut self, writer: &mut dyn Write) -> io::Result<usize>;
-}
-
-impl ReadFrom for Producer<u8> {
-    fn read_from(&mut self, reader: &mut dyn Read) -> io::Result<usize> {
-        let push_fn = |left: &mut [u8], _right: &mut [u8]| -> io::Result<(usize, ())> {
-            reader.read(left).and_then(|n| {
-                if n <= left.len() {
-                    Ok((n, ()))
-                } else {
-                    Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "Read operation returned invalid number",
-                    ))
-                }
-            })
-        };
-        match unsafe { self.push_access(push_fn) } {
-            Ok(res) => match res {
-                Ok((n, ())) => Ok(n),
-                Err(e) => Err(e),
-            },
-            Err(e) => match e {
-                PushAccessError::Full => Err(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "Ring buffer is full",
-                )),
-                PushAccessError::BadLen => unreachable!(),
-            }
-        }
-    }
-}
-
-impl WriteInto for Consumer<u8> {
-    fn write_into(&mut self, writer: &mut dyn Write) -> io::Result<usize> {
-        let pop_fn = |left: &mut [u8], _right: &mut [u8]| -> io::Result<(usize, ())> {
-            writer.write(left).and_then(|n| {
-                if n <= left.len() {
-                    Ok((n, ()))
-                } else {
-                    Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "Write operation returned invalid number",
-                    ))
-                }
-            })
-        };
-        match unsafe { self.pop_access(pop_fn) } {
-            Ok(res) => match res {
-                Ok((n, ())) => Ok(n),
-                Err(e) => Err(e),
-            },
-            Err(e) => match e {
-                PopAccessError::Empty => Err(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "Ring buffer is empty",
-                )),
-                PopAccessError::BadLen => unreachable!(),
-            }
-        }
-    }
-}
-
-impl Write for Producer<u8> {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        self.push_slice(buffer).or_else(|e| match e {
-            PushError::Full => Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "Ring buffer is full",
-            ))
-        })
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-impl Read for Consumer<u8> {
-    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        self.pop_slice(buffer).or_else(|e| match e {
-            PopError::Empty => Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "Ring buffer is empty",
-            ))
-        })
-    }
-}
-
 
 #[cfg(test)]
 #[test]
